@@ -75,6 +75,10 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
             if not os.environ.get(env_var):
                 os.environ[env_var] = api_key
 
+    base_url = os.environ.get("LLM_BASE_URL", "")
+    if base_url:
+        litellm.api_base = base_url
+
 # Supported document extensions for the `add` command
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".md", ".markdown", ".docx", ".pptx", ".xlsx",
