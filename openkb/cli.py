@@ -25,6 +25,7 @@ import litellm
 litellm.suppress_debug_info = True
 from dotenv import load_dotenv
 
+from openkb.cache import cache_override, resolve_cache_enabled
 from openkb.config import DEFAULT_CONFIG, load_config, save_config, load_global_config, register_kb
 from openkb.converter import convert_document
 from openkb.log import append_log
@@ -38,15 +39,16 @@ load_dotenv()  # load from cwd (covers running inside the KB dir)
 
 
 def _setup_llm_key(kb_dir: Path | None = None) -> None:
-    """Set LiteLLM API key from LLM_API_KEY env var if present.
+    """Set LiteLLM API key/base URL from env vars if present.
 
     Load order (override=False, so first one wins):
     1. System environment variables (already set)
     2. KB-local .env  (kb_dir/.env)
     3. Global .env    (~/.config/openkb/.env)
 
-    Also propagates to provider-specific env vars (OPENAI_API_KEY, etc.)
-    so that the Agents SDK litellm provider can pick them up.
+    Also propagates to provider-specific env vars (OPENAI_API_KEY,
+    OPENAI_BASE_URL, etc.) so that the Agents SDK litellm provider can
+    pick them up.
     """
     if kb_dir is not None:
         env_file = kb_dir / ".env"
@@ -75,9 +77,24 @@ def _setup_llm_key(kb_dir: Path | None = None) -> None:
             if not os.environ.get(env_var):
                 os.environ[env_var] = api_key
 
-    base_url = os.environ.get("LLM_BASE_URL", "")
+    base_url = (
+        os.environ.get("LLM_BASE_URL", "")
+        or os.environ.get("LLM_API_BASE", "")
+        or os.environ.get("OPENAI_BASE_URL", "")
+        or os.environ.get("OPENAI_API_BASE", "")
+    )
     if base_url:
         litellm.api_base = base_url
+        for env_var in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            if not os.environ.get(env_var):
+                os.environ[env_var] = base_url
+
+    if not resolve_cache_enabled():
+        disable_cache = getattr(litellm, "disable_cache", None)
+        if callable(disable_cache):
+            disable_cache()
+        else:
+            litellm.cache = None
 
 # Supported document extensions for the `add` command
 SUPPORTED_EXTENSIONS = {
@@ -132,12 +149,12 @@ def _find_kb_dir(override: Path | None = None) -> Path | None:
     return None
 
 
-def add_single_file(file_path: Path, kb_dir: Path) -> None:
+def add_single_file(file_path: Path, kb_dir: Path, *, use_cache: bool | None = None) -> None:
     """Convert, index, and compile a single document into the knowledge base.
 
     Steps:
     1. Load config to get the model name.
-    2. Convert the document (hash-check; skip if already known).
+    2. Convert the document (hash-check; skip if already known when cache is enabled).
     3. If long doc: run PageIndex then compile_long_doc.
     4. Else: compile_short_doc.
     """
@@ -150,11 +167,12 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
     _setup_llm_key(kb_dir)
     model: str = config.get("model", DEFAULT_CONFIG["model"])
     registry = HashRegistry(openkb_dir / "hashes.json")
+    effective_use_cache = resolve_cache_enabled(use_cache)
 
     # 2. Convert document
     click.echo(f"Adding: {file_path.name}")
     try:
-        result = convert_document(file_path, kb_dir)
+        result = convert_document(file_path, kb_dir, use_cache=effective_use_cache)
     except Exception as exc:
         click.echo(f"  [ERROR] Conversion failed: {exc}")
         logger.debug("Conversion traceback:", exc_info=True)
@@ -181,10 +199,11 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
         click.echo(f"  Compiling long doc (doc_id={index_result.doc_id})...")
         for attempt in range(2):
             try:
-                asyncio.run(
-                    compile_long_doc(doc_name, summary_path, index_result.doc_id, kb_dir, model,
-                                     doc_description=index_result.description)
-                )
+                with cache_override(effective_use_cache):
+                    asyncio.run(
+                        compile_long_doc(doc_name, summary_path, index_result.doc_id, kb_dir, model,
+                                         doc_description=index_result.description)
+                    )
                 break
             except Exception as exc:
                 if attempt == 0:
@@ -198,7 +217,8 @@ def add_single_file(file_path: Path, kb_dir: Path) -> None:
         click.echo(f"  Compiling short doc...")
         for attempt in range(2):
             try:
-                asyncio.run(compile_short_doc(doc_name, result.source_path, kb_dir, model))
+                with cache_override(effective_use_cache):
+                    asyncio.run(compile_short_doc(doc_name, result.source_path, kb_dir, model))
                 break
             except Exception as exc:
                 if attempt == 0:
@@ -324,9 +344,14 @@ def init():
 
 
 @cli.command()
+@click.option(
+    "--use-cache/--no-cache",
+    default=None,
+    help="Enable or bypass the duplicate-file cache (default: OPENKB_USE_CACHE, otherwise on).",
+)
 @click.argument("path")
 @click.pass_context
-def add(ctx, path):
+def add(ctx, path, use_cache):
     """Add a document or directory of documents at PATH to the knowledge base."""
     kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
     if kb_dir is None:
@@ -350,7 +375,10 @@ def add(ctx, path):
         click.echo(f"Found {total} supported file(s) in {path}.")
         for i, f in enumerate(files, 1):
             click.echo(f"\n[{i}/{total}] ", nl=False)
-            add_single_file(f, kb_dir)
+            if use_cache is None:
+                add_single_file(f, kb_dir)
+            else:
+                add_single_file(f, kb_dir, use_cache=use_cache)
     else:
         if target.suffix.lower() not in SUPPORTED_EXTENSIONS:
             click.echo(
@@ -358,7 +386,10 @@ def add(ctx, path):
                 f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
             )
             return
-        add_single_file(target, kb_dir)
+        if use_cache is None:
+            add_single_file(target, kb_dir)
+        else:
+            add_single_file(target, kb_dir, use_cache=use_cache)
 
 
 @cli.command()
@@ -537,6 +568,23 @@ def watch(ctx):
 
     click.echo(f"Watching {raw_dir} for new documents. Press Ctrl+C to stop.")
     watch_directory(raw_dir, on_new_files)
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="API host.")
+@click.option("--port", default=19827, show_default=True, type=int, help="API port.")
+@click.pass_context
+def serve(ctx, host, port):
+    """Run the FastAPI service for request-style access."""
+    kb_dir = _find_kb_dir(ctx.obj.get("kb_dir_override"))
+    if kb_dir is not None:
+        os.environ["OPENKB_SERVICE_KB_DIR"] = str(kb_dir)
+    os.environ["OPENKB_API_HOST"] = host
+    os.environ["OPENKB_API_PORT"] = str(port)
+
+    from openkb.service.api import main
+
+    main()
 
 
 async def run_lint(kb_dir: Path) -> Path | None:

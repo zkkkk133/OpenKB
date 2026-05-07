@@ -33,11 +33,11 @@ def get_pdf_page_count(path: Path) -> int:
         return doc.page_count
 
 
-def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
+def convert_document(src: Path, kb_dir: Path, *, use_cache: bool = True) -> ConvertResult:
     """Convert a document and integrate it into the knowledge base.
 
     Steps:
-    1. Hash-check — skip if already known.
+    1. Hash-check — skip if already known and cache is enabled.
     2. Copy source to ``raw/``.
     3. If PDF and page count >= threshold → return :attr:`ConvertResult.is_long_doc`.
     4. If ``.md`` — read, process relative images, save to ``wiki/sources/``.
@@ -56,7 +56,7 @@ def convert_document(src: Path, kb_dir: Path) -> ConvertResult:
     # 1. Hash check
     # ------------------------------------------------------------------
     file_hash = HashRegistry.hash_file(src)
-    if registry.is_known(file_hash):
+    if use_cache and registry.is_known(file_hash):
         logger.info("Skipping already-known file: %s", src.name)
         return ConvertResult(skipped=True)
 

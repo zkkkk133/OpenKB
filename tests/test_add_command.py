@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
-from openkb.cli import SUPPORTED_EXTENSIONS, _find_kb_dir, cli
+from openkb.cli import SUPPORTED_EXTENSIONS, _find_kb_dir, _setup_llm_key, cli
 
 
 class TestSupportedExtensions:
@@ -40,6 +41,21 @@ class TestFindKbDir:
         with patch("openkb.cli.load_global_config", return_value={}):
             result = _find_kb_dir()
             assert result is None
+
+
+class TestSetupLlmKey:
+    def test_sets_base_url_from_llm_base_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LLM_BASE_URL", "https://example.test/v1")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+        monkeypatch.setattr("openkb.cli.litellm.api_base", None, raising=False)
+
+        _setup_llm_key(tmp_path)
+
+        assert os.environ["OPENAI_BASE_URL"] == "https://example.test/v1"
+        assert os.environ["OPENAI_API_BASE"] == "https://example.test/v1"
+        import openkb.cli as cli_module
+        assert cli_module.litellm.api_base == "https://example.test/v1"
 
 
 class TestAddCommand:

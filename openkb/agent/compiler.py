@@ -21,6 +21,7 @@ from pathlib import Path
 
 import litellm
 
+from openkb.cache import resolve_cache_enabled
 from openkb.schema import get_agents_md
 
 logger = logging.getLogger(__name__)
@@ -181,8 +182,18 @@ def _fmt_messages(messages: list[dict], max_content: int = 200) -> str:
     return "\n".join(parts)
 
 
+def _apply_cache_kwargs(kwargs: dict) -> dict:
+    if resolve_cache_enabled():
+        return kwargs
+    call_kwargs = dict(kwargs)
+    call_kwargs.setdefault("caching", False)
+    call_kwargs.setdefault("cache", {"no-cache": True})
+    return call_kwargs
+
+
 def _llm_call(model: str, messages: list[dict], step_name: str, **kwargs) -> str:
     """Single LLM call with animated progress and debug logging."""
+    kwargs = _apply_cache_kwargs(kwargs)
     logger.debug("LLM request [%s]:\n%s", step_name, _fmt_messages(messages))
     if kwargs:
         logger.debug("LLM kwargs [%s]: %s", step_name, kwargs)
@@ -201,11 +212,12 @@ def _llm_call(model: str, messages: list[dict], step_name: str, **kwargs) -> str
 
 async def _llm_call_async(model: str, messages: list[dict], step_name: str) -> str:
     """Async LLM call with timing output and debug logging."""
+    kwargs = _apply_cache_kwargs({})
     logger.debug("LLM request [%s]:\n%s", step_name, _fmt_messages(messages))
 
     t0 = time.time()
 
-    response = await litellm.acompletion(model=model, messages=messages)
+    response = await litellm.acompletion(model=model, messages=messages, **kwargs)
     content = response.choices[0].message.content or ""
 
     elapsed = time.time() - t0

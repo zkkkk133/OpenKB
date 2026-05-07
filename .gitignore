@@ -17,3 +17,4 @@ wiki/
 # Local only
 docs/
 .claude/
+.idea/
